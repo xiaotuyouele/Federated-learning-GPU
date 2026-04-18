@@ -243,6 +243,7 @@ if __name__ == '__main__':
     program_start_time = time.time()
 
     args = args_parser()
+    print("当前输入维度 input_size =", args.input_size)
     args.epochs = 20
     print("args.epochs =", args.epochs)
 

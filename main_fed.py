@@ -163,6 +163,7 @@ def build_model(args, img_size):
 
 
 def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
+                    client_schedule, experiment_seed,
                     frac=None, all_clients_flag=None, verbose=True):
     """
     执行一次联邦训练，返回：
@@ -178,14 +179,22 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
         all_clients_flag = args.all_clients
 
     net_glob = build_model(args, img_size)
-    net_glob.train()
 
-    w_glob = net_glob.state_dict()
+    FAIR_DIR = "/content/drive/MyDrive/fair_experiment"
+    init_state = torch.load(
+        os.path.join(FAIR_DIR, f"init_model_seed{experiment_seed}.pth"),
+        map_location=args.device
+    )
+    net_glob.load_state_dict(init_state)
+
+    net_glob.train()
+    w_glob = copy.deepcopy(net_glob.state_dict())
 
     loss_train = []
     acc_curve = []
     epoch_times = []
-
+    agg_times = []
+                        
     if all_clients_flag:
         if verbose:
             print("Aggregation over all clients")
@@ -200,8 +209,12 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
         if not all_clients_flag:
             w_locals = []
 
-        m = max(int(frac * args.num_users), 1)
-        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        if all_clients_flag:
+            idxs_users = list(range(args.num_users))
+        else:
+            m = max(int(frac * args.num_users), 1)
+            epoch_order = list(client_schedule[epoch])
+            idxs_users = epoch_order[:m]
 
         for idx in idxs_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
@@ -214,8 +227,11 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
 
             loss_locals.append(copy.deepcopy(loss))
 
+        agg_start_time = time.time()
         w_glob = FedAvg(w_locals)
         net_glob.load_state_dict(w_glob)
+        agg_time = time.time() - agg_start_time
+        agg_times.append(agg_time)
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         loss_train.append(loss_avg)
@@ -229,13 +245,13 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
         epoch_times.append(epoch_time)
 
         if verbose:
-            print('Round {:3d}, Average loss {:.4f}, Test accuracy {:.4f}, Time {:.2f}s'.format(
-                epoch + 1, loss_avg, acc_test, epoch_time
+            print('Round {:3d}, clients {:3d}, Average loss {:.4f}, Test accuracy {:.4f}, Epoch Time {:.2f}s, Agg Time {:.4f}s'.format(
+                    epoch + 1, len(idxs_users), loss_avg, acc_test, epoch_time, agg_time
             ))
 
     total_train_time = time.time() - train_start_time
 
-    return net_glob, loss_train, acc_curve, epoch_times, total_train_time
+    return net_glob, loss_train, acc_curve, epoch_times, agg_times, total_train_time
 
 
 if __name__ == '__main__':
@@ -284,19 +300,23 @@ if __name__ == '__main__':
             raise ValueError("当前代码未为 CIFAR 写 Dirichlet 非IID 划分，可先用 synthetic 或 mnist")
 
     elif args.dataset == 'synthetic':
-        dataset_train, dataset_test = generate_synthetic_dataset(args, seed=0)
+        FAIR_DIR = "/content/drive/MyDrive/fair_experiment"
 
+        dataset_train = torch.load(os.path.join(FAIR_DIR, "dataset_train.pt"))
+        dataset_test = torch.load(os.path.join(FAIR_DIR, "dataset_test.pt"))
+
+    # 单次训练默认读取一个固定划分
         if args.iid:
-            dict_users = build_iid_split(dataset_train, args.num_users, seed=0)
+            dict_users = np.load(
+                os.path.join(FAIR_DIR, "dict_users_iid_seed0.npy"),
+                allow_pickle=True
+            ).item()
         else:
-            dict_users = build_dirichlet_split(
-                dataset_train=dataset_train,
-                num_users=args.num_users,
-                num_classes=args.num_classes,
-                alpha=args.alpha,
-                min_samples=1,
-                seed=0
-            )
+            dict_users = np.load(
+                os.path.join(FAIR_DIR, f"dict_users_alpha{args.alpha}_seed0.npy"),
+                allow_pickle=True
+            ).item()
+            
     else:
         exit('Error: unrecognized dataset')
 
@@ -316,12 +336,22 @@ if __name__ == '__main__':
     print("\n========== Single training ==========")
     single_train_start = time.time()
 
-    net_glob, loss_curve, acc_curve, epoch_times, total_train_time = train_federated(
+    FAIR_DIR = "/content/drive/MyDrive/fair_experiment"
+
+    single_seed = 0
+    single_client_schedule = np.load(
+        os.path.join(FAIR_DIR, f"client_schedule_frac{args.frac}_seed{single_seed}.npy"),
+        allow_pickle=True
+    )
+
+    net_glob, loss_curve, acc_curve, epoch_times, agg_times, total_train_time = train_federated(
         args=args,
         dataset_train=dataset_train,
         dataset_test=dataset_test,
         dict_users=dict_users,
         img_size=img_size,
+        client_schedule=single_client_schedule,
+        experiment_seed=single_seed,
         frac=args.frac,
         all_clients_flag=args.all_clients,
         verbose=True
@@ -368,11 +398,17 @@ if __name__ == '__main__':
         "avg_epoch_time_sec": float(np.mean(epoch_times)),
         "min_epoch_time_sec": float(np.min(epoch_times)),
         "max_epoch_time_sec": float(np.max(epoch_times)),
+        "avg_agg_time_sec": float(np.mean(agg_times)),
+        "min_agg_time_sec": float(np.min(agg_times)),
+        "max_agg_time_sec": float(np.max(agg_times)),
+        "total_agg_time_sec": float(np.sum(agg_times)),
         "final_train_acc": float(acc_train),
         "final_test_acc": float(acc_test)
     }
     np.save(os.path.join(SAVE_DIR, "single_time_summary.npy"), single_time_summary)
     print("single_time_summary.npy 已保存")
+    np.save(os.path.join(SAVE_DIR, "single_agg_times.npy"), np.array(agg_times))
+    print("single_agg_times.npy 已保存")
 
     # =========================================================
     # 1) 多 α 实验：固定 frac，看 α 对最终精度和收敛曲线的影响
@@ -387,6 +423,8 @@ if __name__ == '__main__':
     alpha_results = {}
     alpha_time_results = {}
     alpha_run_times = {}
+    alpha_agg_time_results = {}
+    alpha_agg_run_times = {}
 
     # 比较 α 时，必须真的走“采样部分客户端”的逻辑
     compare_all_clients_flag = False
@@ -398,30 +436,33 @@ if __name__ == '__main__':
         acc_curves_alpha = []
         final_acc_list = []
         time_list_alpha = []
+        agg_time_list_alpha = []
 
         for run in range(runs_per_setting):
             run_start = time.time()
             set_seed(run)
 
             if args.dataset == 'synthetic':
-                dict_users_run = build_dirichlet_split(
-                    dataset_train=dataset_train,
-                    num_users=args.num_users,
-                    num_classes=args.num_classes,
-                    alpha=alpha,
-                    min_samples=1,
-                    seed=run
-                )
+                dict_users_run = np.load(
+                    os.path.join(FAIR_DIR, f"dict_users_alpha{alpha}_seed{run}.npy"),
+                    allow_pickle=True
+                ).item()
             else:
-                # 对 mnist/cifar，如果已有固定分法，就直接沿用
                 dict_users_run = copy.deepcopy(dict_users)
 
-            _, _, acc_curve_run, epoch_times_run, total_time_run = train_federated(
+            client_schedule_run = np.load(
+                os.path.join(FAIR_DIR, f"client_schedule_frac{args.frac}_seed{run}.npy"),
+                allow_pickle=True
+            )
+            
+            _, _, acc_curve_run, epoch_times_run, agg_times_run, total_time_run = train_federated(
                 args=args,
                 dataset_train=dataset_train,
                 dataset_test=dataset_test,
                 dict_users=dict_users_run,
                 img_size=img_size,
+                client_schedule=client_schedule_run,
+                experiment_seed=run,
                 frac=args.frac,
                 all_clients_flag=compare_all_clients_flag,
                 verbose=False
@@ -432,6 +473,7 @@ if __name__ == '__main__':
             acc_curves_alpha.append(acc_curve_run)
             final_acc_list.append(acc_curve_run[-1])
             time_list_alpha.append(total_time_run)
+            agg_time_list_alpha.append(float(np.sum(agg_times_run)))
 
             print("run {:2d}/{:2d}, final acc = {:.4f}, train_time = {:.2f}s, wall_time = {:.2f}s".format(
                 run + 1, runs_per_setting, acc_curve_run[-1], total_time_run, run_total_wall_time
@@ -449,6 +491,11 @@ if __name__ == '__main__':
             float(np.std(time_list_alpha))
         )
         alpha_run_times[alpha] = time_list_alpha
+        alpha_agg_time_results[alpha] = (
+            float(np.mean(agg_time_list_alpha)),
+            float(np.std(agg_time_list_alpha))
+        )
+        alpha_agg_run_times[alpha] = agg_time_list_alpha
 
         alpha_setting_total_time = time.time() - alpha_setting_start
 
@@ -463,7 +510,9 @@ if __name__ == '__main__':
     np.save(os.path.join(SAVE_DIR, "results.npy"), alpha_results)
     np.save(os.path.join(SAVE_DIR, "alpha_time_results.npy"), alpha_time_results)
     np.save(os.path.join(SAVE_DIR, "alpha_run_times.npy"), alpha_run_times)
-    print("convergence.npy、results.npy、alpha_time_results.npy、alpha_run_times.npy 已保存")
+    np.save(os.path.join(SAVE_DIR, "alpha_agg_time_results.npy"), alpha_agg_time_results)
+    np.save(os.path.join(SAVE_DIR, "alpha_agg_run_times.npy"), alpha_agg_run_times)
+    print("convergence.npy、results.npy、alpha_time_results.npy、alpha_run_times.npy、alpha_agg_time_results.npy、alpha_agg_run_times.npy 已保存")
 
     multi_alpha_total_time = time.time() - multi_alpha_start
     print("Multi-alpha experiment 总时间: {:.2f} 秒".format(multi_alpha_total_time))
@@ -483,6 +532,8 @@ if __name__ == '__main__':
     convergence_curves_frac = {}
     frac_time_results = {}
     frac_run_times = {}
+    frac_agg_time_results = {}
+    frac_agg_run_times = {}
 
     # frac 对比时，不要走 all_clients
     compare_all_clients_flag = False
@@ -491,52 +542,56 @@ if __name__ == '__main__':
     pair_final_accs = {(a, f): [] for a in alphas_for_frac for f in fracs}
     pair_curves = {(a, f): [] for a in alphas_for_frac for f in fracs}
     pair_times = {(a, f): [] for a in alphas_for_frac for f in fracs}
+    pair_agg_times = {(a, f): [] for a in alphas_for_frac for f in fracs}
 
     for alpha_fixed in alphas_for_frac:
         print("\n===== α = {} =====".format(alpha_fixed))
         alpha_fixed_start = time.time()
 
         for run in range(runs_per_setting):
-            set_seed(1000 + run)
+            seed_id = run   # 建议统一成 run，不要 1000+run
 
             if args.dataset == 'synthetic':
-                # 同一个 alpha、同一个 run 下，先固定一次分布
-                dict_users_run = build_dirichlet_split(
-                    dataset_train=dataset_train,
-                    num_users=args.num_users,
-                    num_classes=args.num_classes,
-                    alpha=alpha_fixed,
-                    min_samples=1,
-                    seed=1000 + run
-                )
+                dict_users_run = np.load(
+                    os.path.join(FAIR_DIR, f"dict_users_alpha{alpha_fixed}_seed{seed_id}.npy"),
+                    allow_pickle=True
+                ).item()
             else:
                 dict_users_run = copy.deepcopy(dict_users)
 
             for frac in fracs:
+                client_schedule_run = np.load(
+                    os.path.join(FAIR_DIR, f"client_schedule_frac{frac}_seed{seed_id}.npy"),
+                    allow_pickle=True
+                )
+
                 pair_start = time.time()
                 print("alpha={}, frac={}, run={}".format(alpha_fixed, frac, run + 1))
 
-                _, _, acc_curve_run, epoch_times_run, total_time_run = train_federated(
+                _, _, acc_curve_run, epoch_times_run, agg_times_run, total_time_run = train_federated(
                     args=args,
                     dataset_train=dataset_train,
                     dataset_test=dataset_test,
                     dict_users=dict_users_run,
                     img_size=img_size,
+                    client_schedule=client_schedule_run,
+                    experiment_seed=seed_id,
                     frac=frac,
                     all_clients_flag=compare_all_clients_flag,
                     verbose=False
-                )
+                )    
 
                 pair_wall_time = time.time() - pair_start
 
                 pair_final_accs[(alpha_fixed, frac)].append(acc_curve_run[-1])
                 pair_curves[(alpha_fixed, frac)].append(acc_curve_run)
                 pair_times[(alpha_fixed, frac)].append(total_time_run)
+                pair_agg_times[(alpha_fixed, frac)].append(float(np.sum(agg_times_run)))
 
                 print("final acc = {:.4f}, train_time = {:.2f}s, wall_time = {:.2f}s".format(
                     acc_curve_run[-1], total_time_run, pair_wall_time
                 ))
-
+                
         alpha_fixed_total_time = time.time() - alpha_fixed_start
         print("α={} 的所有 frac + run 总耗时: {:.2f} 秒".format(alpha_fixed, alpha_fixed_total_time))
 
@@ -545,17 +600,25 @@ if __name__ == '__main__':
             final_accs = pair_final_accs[(alpha_fixed, frac)]
             curves = pair_curves[(alpha_fixed, frac)]
             times_list = pair_times[(alpha_fixed, frac)]
+            agg_times_list = pair_agg_times[(alpha_fixed, frac)]
 
             frac_results[(alpha_fixed, frac)] = (
                 float(np.mean(final_accs)),
                 float(np.std(final_accs))
             )
+            
             convergence_curves_frac[(alpha_fixed, frac)] = np.mean(np.array(curves), axis=0)
             frac_time_results[(alpha_fixed, frac)] = (
                 float(np.mean(times_list)),
                 float(np.std(times_list))
             )
             frac_run_times[(alpha_fixed, frac)] = times_list
+            
+            frac_agg_time_results[(alpha_fixed, frac)] = (
+                float(np.mean(agg_times_list)),
+                float(np.std(agg_times_list))
+            )
+            frac_agg_run_times[(alpha_fixed, frac)] = agg_times_list
 
             print("α={}, frac={}, mean_acc={:.4f}, std_acc={:.4f}, mean_time={:.2f}s, std_time={:.2f}s".format(
                 alpha_fixed,
@@ -570,7 +633,9 @@ if __name__ == '__main__':
     np.save(os.path.join(SAVE_DIR, "convergence_frac.npy"), convergence_curves_frac)
     np.save(os.path.join(SAVE_DIR, "frac_time_results.npy"), frac_time_results)
     np.save(os.path.join(SAVE_DIR, "frac_run_times.npy"), frac_run_times)
-    print("frac_results.npy、convergence_frac.npy、frac_time_results.npy、frac_run_times.npy 已保存")
+    np.save(os.path.join(SAVE_DIR, "frac_agg_time_results.npy"), frac_agg_time_results)
+    np.save(os.path.join(SAVE_DIR, "frac_agg_run_times.npy"), frac_agg_run_times)
+    print("frac_results.npy、convergence_frac.npy、frac_time_results.npy、frac_run_times.npy、frac_agg_time_results.npy、frac_agg_run_times.npy 已保存")
 
     multi_alpha_frac_total_time = time.time() - multi_alpha_frac_start
     print("Multi-alpha + multi-frac experiment 总时间: {:.2f} 秒".format(multi_alpha_frac_total_time))
@@ -582,7 +647,8 @@ if __name__ == '__main__':
         "single_training_block_time_sec": float(single_train_total_time),
         "multi_alpha_time_sec": float(multi_alpha_total_time),
         "multi_alpha_frac_time_sec": float(multi_alpha_frac_total_time),
-        "program_total_time_sec": float(program_total_time)
+        "program_total_time_sec": float(program_total_time),
+        "single_total_agg_time_sec": float(np.sum(agg_times))
     }
     np.save(os.path.join(SAVE_DIR, "overall_time_summary.npy"), overall_time_summary)
 

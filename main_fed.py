@@ -302,8 +302,8 @@ if __name__ == '__main__':
     elif args.dataset == 'synthetic':
         FAIR_DIR = "/content/drive/MyDrive/fair_experiment"
 
-        dataset_train = torch.load(os.path.join(FAIR_DIR, "dataset_train.pt"))
-        dataset_test = torch.load(os.path.join(FAIR_DIR, "dataset_test.pt"))
+        dataset_train = torch.load(os.path.join(FAIR_DIR, "dataset_train_seed0.pt"))
+        dataset_test = torch.load(os.path.join(FAIR_DIR, "dataset_test_seed0.pt"))
 
     # 单次训练默认读取一个固定划分
         if args.iid:
@@ -313,7 +313,7 @@ if __name__ == '__main__':
             ).item()
         else:
             dict_users = np.load(
-                os.path.join(FAIR_DIR, f"dict_users_alpha{args.alpha}_seed0.npy"),
+                os.path.join(FAIR_DIR, "dict_users_seed0.npy"),
                 allow_pickle=True
             ).item()
             
@@ -340,7 +340,7 @@ if __name__ == '__main__':
 
     single_seed = 0
     single_client_schedule = np.load(
-        os.path.join(FAIR_DIR, f"client_schedule_frac{args.frac}_seed{single_seed}.npy"),
+        os.path.join(FAIR_DIR, f"client_schedule_seed{single_seed}.npy"),
         allow_pickle=True
     )
 

@@ -302,8 +302,14 @@ if __name__ == '__main__':
     elif args.dataset == 'synthetic':
         FAIR_DIR = "/content/drive/MyDrive/fair_experiment"
 
-        dataset_train = torch.load(os.path.join(FAIR_DIR, "dataset_train_seed0.pt"))
-        dataset_test = torch.load(os.path.join(FAIR_DIR, "dataset_test_seed0.pt"))
+        dataset_train = torch.load(
+            os.path.join(FAIR_DIR, "dataset_train_seed0.pt"),
+            weights_only=False
+        )
+        dataset_test = torch.load(
+            os.path.join(FAIR_DIR, "dataset_test_seed0.pt"),
+            weights_only=False
+        )
 
     # 单次训练默认读取一个固定划分
         if args.iid:

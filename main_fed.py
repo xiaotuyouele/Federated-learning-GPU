@@ -202,6 +202,7 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
 
     # 详细时间明细
     time_detail = {
+        "mode": "GPU_train_GPU_agg",
         "epoch_times_sec": [],
         "agg_times_sec": [],
         "local_train_times_sec": [],
@@ -247,12 +248,16 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
 
-        if all_clients_flag:
-            w_locals[idx] = w
-        else:
-            w_locals.append(w)
+            # 必须放在循环内，否则每轮只会保留最后一个客户端
+            if all_clients_flag:
+                w_locals[idx] = w
+            else:
+                w_locals.append(w)
 
-        loss_locals.append(loss)
+            loss_locals.append(loss)
+
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
 
         local_train_time = time.time() - local_train_start_time
         local_train_times.append(local_train_time)
@@ -260,9 +265,16 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
         # =====================
         # 3) 聚合时间
         # =====================
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
+
         agg_start_time = time.time()
         w_glob = FedAvg(w_locals)
         net_glob.load_state_dict(w_glob)
+
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
+
         agg_time = time.time() - agg_start_time
         agg_times.append(agg_time)
 
@@ -280,6 +292,9 @@ def train_federated(args, dataset_train, dataset_test, dict_users, img_size,
         # =====================
         # 5) 本轮总时间
         # =====================
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
+
         epoch_time = time.time() - epoch_start_time
         epoch_times.append(epoch_time)
 
@@ -354,6 +369,10 @@ if __name__ == '__main__':
     device_type = "GPU" if torch.cuda.is_available() and args.gpu != -1 else "CPU"
     print("当前设备:", device_type)
     print("device =", args.device)
+    print("========== Only-GPU 模式 ==========")
+    print("本地训练设备: GPU")
+    print("聚合设备: GPU")
+    print("全局模型设备: GPU")
 
     # ===== 读取数据（synthetic only） =====
     data_prepare_start = time.time()
@@ -488,6 +507,7 @@ if __name__ == '__main__':
     print("single_time_detail.npy 已保存")
 
     single_time_summary = {
+        "mode": "GPU_train_GPU_agg",
         "device": device_type,
         "data_prepare_time_sec": float(data_prepare_time),
 
@@ -687,16 +707,16 @@ if __name__ == '__main__':
                 print("alpha={}, frac={}, run={}".format(alpha_fixed, frac, run + 1))
 
                 (
-                _,
-                _,
-                acc_curve_run,
-                epoch_times_run,
-                agg_times_run,
-                local_train_times_run,
-                schedule_times_run,
-                total_time_run,
-                time_detail_run
-            ) = train_federated(
+                    _,
+                    _,
+                    acc_curve_run,
+                    epoch_times_run,
+                    agg_times_run,
+                    local_train_times_run,
+                    schedule_times_run,
+                    total_time_run,
+                    time_detail_run
+                ) = train_federated(
                     args=args,
                     dataset_train=dataset_train,
                     dataset_test=dataset_test,
@@ -772,6 +792,7 @@ if __name__ == '__main__':
 
     program_total_time = time.time() - program_start_time
     overall_time_summary = {
+        "mode": "GPU_train_GPU_agg",
         "device": device_type,
         "data_prepare_time_sec": float(data_prepare_time),
         "single_training_block_time_sec": float(single_train_total_time),
